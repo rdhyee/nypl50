@@ -14,9 +14,15 @@ import jinja2
 
 from gitenberg import metadata
 
+# a list of the repos under the https://github.com/GITenberg/ org
+# e.g., Adventures-of-Huckleberry-Finn_76 -> https://github.com/GITenberg/Adventures-of-Huckleberry-Finn_76/
 
 REPOS_LIST_URL = "https://raw.githubusercontent.com/gitenberg-dev/Second-Folio/master/list_of_repos.txt"
+
+# local directory under which are stored individual GITenberg repos
 GITENBERG_DIR = "/Users/raymondyee/C/src/gitenberg/"
+
+# template for the .travis.yml files to write to individual GITenberg repos
 TRAVIS_TEMPLATE_URL = "https://github.com/gitenberg-dev/templates/raw/master/.travis.yml"
 
 
