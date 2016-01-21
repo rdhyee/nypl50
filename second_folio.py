@@ -1,4 +1,3 @@
-
 import glob
 import os
 import shutil
@@ -11,6 +10,7 @@ import sh
 import pexpect
 import yaml
 import jinja2
+import semantic_version
 
 from gitenberg import metadata
 
@@ -28,7 +28,7 @@ TRAVIS_TEMPLATE_URL = "https://github.com/gitenberg-dev/templates/raw/master/.tr
 
 def git_pull(repo):
     sh.cd(os.path.join(GITENBERG_DIR, repo))
-    sh.git("pull")
+    return sh.git("pull")
 
 def repos_list():
     r = requests.get(REPOS_LIST_URL)
@@ -37,7 +37,7 @@ def repos_list():
 
 def travis_template():
     r = requests.get(TRAVIS_TEMPLATE_URL)
-    return r.content
+    return jinja2.Template(r.content)
 
 
 def apply_to_repos(action, args=None, kwargs=None, repos=None):
@@ -139,7 +139,7 @@ def travis_setup_releases(repo, path, username, password, file_to_upload):
     child.expect("Encrypt API")
     child.sendline("yes")
     
-def apply_travis(repo,username, password, overwrite_travis=False):
+def apply_travis(repo,username, password, overwrite_travis=False, setup_releases=False):
     sh.cd(os.path.join(GITENBERG_DIR, repo))
     
     metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")
@@ -152,24 +152,38 @@ def apply_travis(repo,username, password, overwrite_travis=False):
         epub_title = slugify(md.metadata.get("title"))
         encrypted_key = "xxxx"  # looking for a replacement
         
+        # look for a token file containing encrypted_key
+        
         # write the travis file
         if not os.path.exists(".travis.yml") or overwrite_travis:
             with open(".travis.yml", "w") as f:
                 travis_source = travis_template.render(encrypted_key=encrypted_key, epub_title=epub_title, repo_name=repo_name)
                 f.write(travis_source)
         
-           # run travis setup releases to get an encrypted key
+           # run travis setup releases to get an encrypted key in .travis.deploy.api_key.txt
+            try:
+                f = open(".travis.deploy.api_key.txt", "r")
+            except IOError:
+                pass
+            else:
+                try:
+                    encrypted_key = f.read()
+                finally:
+                    f.close()
             
-            travis_setup_releases(repo, os.path.join(GITENBERG_DIR, repo), 
-                                  username, password, "{}.epub".format(epub_title))
-        
+            if setup_releases:
+                try:
+                    travis_setup_releases(repo, os.path.join(GITENBERG_DIR, repo), 
+                                          username, password, "{}.epub".format(epub_title))
 
-            time.sleep(5) # wait to make sure the token gets written
-            
-            # now read off the encrypted key and use it to rewrite the travis file
-            y = yaml.load(open(travis_path).read())
-            encrypted_key = y['deploy']['api_key']['secure']
-            print (encrypted_key)
+                    time.sleep(5) # wait to make sure the token gets written
+
+                    # now read off the encrypted key and use it to rewrite the travis file
+                    y = yaml.load(open(travis_path).read())
+                    encrypted_key = y['deploy']['api_key']['secure']
+                    print (encrypted_key)
+                except:
+                    pass
             
             if encrypted_key <> "xxxx":
                 with open(".travis.yml", "w") as f:
@@ -235,6 +249,69 @@ def _travis_setup_releases_0():
                              _timeout=5, _ok_code=[0,1], _out=process_output, _err=process_output,_tty_in=True, _out_bufsize=0)
     p.wait()
     
+def write_travis_token_file(repo, rewrite_file=False):
+    sh.cd(os.path.join(GITENBERG_DIR, repo))
+    
+    metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")
+    travis_path = os.path.join(GITENBERG_DIR, repo, ".travis.yml")
+    token_path = os.path.join(GITENBERG_DIR, repo, ".travis.deploy.api_key.txt")
+    
+    # now read off the encrypted key and use it to rewrite the travis file
+    try:
+        y = yaml.load(open(travis_path).read())
+        encrypted_key = y['deploy']['api_key']['secure']
+    except:
+        encrypted_key = None
+
+    if encrypted_key is not None:
+        if not os.path.exists(token_path) or rewrite_file:
+            token_file = open(token_path, "w")
+            token_file.write(encrypted_key)
+            token_file.close()
+            
+    return encrypted_key
+
+def latest_epub(repo):
+    metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")
+    if os.path.exists(metadata_path):
+        md = metadata.pandata.Pandata(metadata_path)
+        #repo_name = md.metadata.get("_repo")
+        epub_title = slugify(md.metadata.get("title"))
+        tag = md.metadata.get("_version")
+        url = "https://github.com/GITenberg/{}/releases/download/{}/{}.epub".format(repo, tag, epub_title)
+        return url
+    else:
+        return None
+    
+
+def repo_version(repo, version_type='patch', write_version=False):
+    
+    assert version_type in ('patch', 'minor', 'major')
+    
+    metadata_updated = False
+    
+    sh.cd(os.path.join(GITENBERG_DIR, repo))
+    metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")
+    
+    if os.path.exists(metadata_path):
+        md = metadata.pandata.Pandata(metadata_path)
+        _version = md.metadata.get("_version")
+        next_func = getattr(semantic_version.Version(_version), "next_{}".format(version_type))
+        _next_version = unicode(next_func())
+        
+        if write_version:
+            md.metadata["_version"] =  _next_version
+            with open(metadata_path, 'w') as f:
+                f.write(yaml.safe_dump(md.metadata,default_flow_style=False,allow_unicode=True))
+            metadata_updated = True
+        
+        return (_version, _next_version, metadata_updated)
+    
+    else:
+        
+        return (None, None, False)
+    
+    
+    
 all_repos = repos_list()
-travis_template = jinja2.Template(travis_template())
 
