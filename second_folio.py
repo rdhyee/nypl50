@@ -25,7 +25,6 @@ GITENBERG_DIR = "/Users/raymondyee/C/src/gitenberg/"
 # template for the .travis.yml files to write to individual GITenberg repos
 TRAVIS_TEMPLATE_URL = "https://github.com/gitenberg-dev/templates/raw/master/.travis.yml"
 
-
 def git_pull(repo):
     sh.cd(os.path.join(GITENBERG_DIR, repo))
     return sh.git("pull")
@@ -34,11 +33,9 @@ def repos_list():
     r = requests.get(REPOS_LIST_URL)
     return r.content.strip().split("\n")
 
-
 def travis_template():
     r = requests.get(TRAVIS_TEMPLATE_URL)
     return jinja2.Template(r.content)
-
 
 def apply_to_repos(action, args=None, kwargs=None, repos=None):
 
@@ -71,7 +68,6 @@ def git_mv_asciidoc(repo):
         return True
     else:
         return False
-
     
 def git_commit_mv_asciidoc(repo):
     
@@ -115,8 +111,7 @@ def has_travis_with_gitenberg_build(repo):
                 return False
         except Exception as e:
             return False
-            
-    
+                
 def travis_setup_releases(repo, path, username, password, file_to_upload):
 
     cmd = """travis setup releases --force --no-interactive"""
@@ -236,7 +231,6 @@ def slugify(value):
     
     return value
 
-    
 def _travis_setup_releases_0():
     """
     a failed attempt 
@@ -283,7 +277,6 @@ def latest_epub(repo):
     else:
         return None
     
-
 def repo_version(repo, version_type='patch', write_version=False):
     
     assert version_type in ('patch', 'minor', 'major')
@@ -310,8 +303,38 @@ def repo_version(repo, version_type='patch', write_version=False):
     else:
         
         return (None, None, False)
+        
+def new_travis_template(repo, template, write_template=False):
+    """
+    compute (and optionally write) .travis.yml based on the template and current metadata.yaml 
+    """
+    template_written = False
     
+    sh.cd(os.path.join(GITENBERG_DIR, repo))
+
+    metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")
+    travis_path = os.path.join(GITENBERG_DIR, repo, ".travis.yml")
+    travis_api_key_path = os.path.join(GITENBERG_DIR, repo, ".travis.deploy.api_key.txt") 
     
+    md = metadata.pandata.Pandata(metadata_path)
+    epub_title = slugify(md.metadata.get("title"))
+    encrypted_key = open(travis_api_key_path).read().strip()
+    repo_name = md.metadata.get("_repo")
     
+    template_vars =  {
+        'epub_title': epub_title,
+        'encrypted_key': encrypted_key,
+        'repo_name': repo_name
+    }
+    
+    template_result = template.render(**template_vars)
+    
+    if write_template:
+        with open(travis_path, "w") as f:
+            f.write(template_result)
+        template_written = True
+    
+    return (template_result, template_written)
+
 all_repos = repos_list()
 
