@@ -324,7 +324,8 @@ def new_travis_template(repo, template, write_template=False):
     template_vars =  {
         'epub_title': epub_title,
         'encrypted_key': encrypted_key,
-        'repo_name': repo_name
+        'repo_name': repo_name,
+        'repo_owner': 'GITenberg'
     }
     
     template_result = template.render(**template_vars)
@@ -335,6 +336,41 @@ def new_travis_template(repo, template, write_template=False):
         template_written = True
     
     return (template_result, template_written)
+
+def repo_cloned(repo, ssh_host="git@github-GITenberg", repo_owner='GITenberg', 
+                gitenberg_dir = GITENBERG_DIR):
+    
+    """
+    check whether the GITenberg repo has been cloned with the right git origin 
+    returns tuple: (boolean, Exception if False)
+    """
+    git_origin = "{}:{}/{}".format(ssh_host, repo_owner, repo)
+    
+    try:
+        sh.cd(os.path.join(gitenberg_dir, repo))
+        # grep for the desired git_origin
+        if len(sh.grep (
+                  sh.git.remote.show("-n", "origin"), git_origin, _ok_code=[0,1])
+              ):
+            # the second arg is for exception should the first one is False
+            return (True, None)
+        else:
+            return (False, None)
+    except Exception as e:
+        return (False, e)
+
+def clone_repo(repo, ssh_host="git@github-GITenberg", repo_owner='GITenberg', 
+                gitenberg_dir = GITENBERG_DIR):
+    """
+    """
+    git_origin = "{}:{}/{}".format(ssh_host, repo_owner, repo)
+    
+    try:
+        sh.cd(gitenberg_dir)
+        clone_output = sh.git.clone(git_origin)
+        return (True, clone_output)
+    except Exception as e:
+        return (False, e)    
 
 all_repos = repos_list()
 
