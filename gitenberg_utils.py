@@ -157,7 +157,10 @@ class GitenbergJob(object):
         
         md = self.metadata()
         repo_name = md.metadata.get("_repo")
-        epub_title = slugify(md.metadata.get("title"))
+        # epub_title = slugify(md.metadata.get("title"))
+        # go for the default
+        # https://github.com/gitenberg-dev/metadata/blob/394dbd77bbb868d43b9f3511914b5df12f571063/gitenberg/metadata/pandata.py#L167
+        epub_title = 'book'
 
         # pick from rep
         if encrypted_key is None:
@@ -281,7 +284,8 @@ class GitenbergJob(object):
             'asciidocs': self.asciidoc_in_repo_root(),
             'version': unicode(version),
             'ebooks_in_latest_github_release': ebooks_in_latest_github_release,
-            'ebooks_in_release_count': len(ebooks_in_latest_github_release)
+            'ebooks_in_release_count': len(ebooks_in_latest_github_release),
+            'root_hashes': [hash_.path for hash_ in self.root_tree()]
         }
         
         _status.update(dict([(path, self.in_root_tree(path)) for path in files_of_interest]))
@@ -432,7 +436,16 @@ class ForkBuildRepo(GitenbergTravisJob):
         if not self.travis_repo.enable():
             raise Exception("unable to enable travis repo:{}".format(self.repo_slug))
     
-        encrypted_key = self.travis_encrypt(self.repo_token())
+        # self.repo_token() might be None or a new generated token.
+
+        try:
+            encrypted_key = self.travis_encrypt(self.repo_token())
+        except:
+            # if an exception, try reading from existing .travis.deploy.api_key.txt
+            encrypted_key = self.gh_repo.contents(".travis.deploy.api_key.txt", ref='master').decoded
+            if encrypted_key is None:
+                raise Exception ('cannot get or generate an encrypted key')
+
         
         # update .travis.deploy.api_key.txt if requested
         if update_repo_token_file:
@@ -559,3 +572,21 @@ class MetadataWrite(GitenbergJob):
             return (self.repo_name, result)
         except Exception as e:
             return (self.repo_name, e)
+
+class RepoNameFixer(BuildRepo):
+
+    def run (self):
+        # check whether repo_name in metadata.yaml and .travis.yml match the repo name
+        md = self.metadata().metadata
+        if md.get('_repo') != self.repo_name:
+            # fix metadata.yaml
+            md['_repo'] = self.repo_name
+            result = self.create_or_update_file(
+                 path = "metadata.yaml",
+                 message = "fix repo name in metadata.yaml",
+                 content = yaml.safe_dump(md,default_flow_style=False,
+                      allow_unicode=True),
+                 ci_skip = True)
+
+        # do rest of run
+        super(RepoNameFixer, self).run()
