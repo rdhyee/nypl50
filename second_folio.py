@@ -243,7 +243,7 @@ def _travis_setup_releases_0():
                              _timeout=5, _ok_code=[0,1], _out=process_output, _err=process_output,_tty_in=True, _out_bufsize=0)
     p.wait()
     
-def write_travis_token_file(repo, rewrite_file=False):
+def write_repo_token_file(repo, rewrite_file=False):
     sh.cd(os.path.join(GITENBERG_DIR, repo))
     
     metadata_path = os.path.join(GITENBERG_DIR, repo, "metadata.yaml")

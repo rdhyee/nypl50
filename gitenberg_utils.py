@@ -22,7 +22,6 @@ from travispy import TravisPy
 
 from second_folio import (travis_template, slugify)
 
-
 class GitenbergJob(object):
     def __init__(self, username, password, repo_name, repo_owner,
                update_travis_commit_msg,
@@ -309,7 +308,7 @@ class GitenbergJob(object):
 class GitenbergTravisJob(GitenbergJob):
     def __init__(self, username, password, repo_name, repo_owner,
                update_travis_commit_msg,
-               tag_commit_message, travis_token=None, repo_token=None):
+               tag_commit_message, github_token=None, access_token=None, repo_token=None):
         
         super(GitenbergTravisJob, self).__init__(username, password, repo_name, repo_owner,
                update_travis_commit_msg,
@@ -318,14 +317,18 @@ class GitenbergTravisJob(GitenbergJob):
         self.username = username
         self.password = password
         
-        self._travis_token = travis_token
-        if travis_token is None:
-            self._travis_token = self.travis_token()
-            
+        self._github_token = github_token
+        self._access_token = access_token
+
+        # if access_token is given, use it
+        if access_token is not None:
+            self.travis = TravisPy(access_token)
+        else:
+            self.travis = TravisPy.github_auth(self.github_token())
+
         self._repo_token = repo_token    
         self._travis_repo_public_key = None
- 
-        self.travis = TravisPy.github_auth(self.travis_token())
+
         if self.gh_repo is not None:
             self.travis_repo = self.travis.repo(self.repo_slug)
        
@@ -337,17 +340,18 @@ class GitenbergTravisJob(GitenbergJob):
         return self._travis_repo_public_key
 
 
-    def travis_token(self):
+    def github_token(self):
 
-        if self._travis_token is not None:
-            return self._travis_token
+        if self._github_token is not None:
+            return self._github_token
         
         token_note = "token for travis {}".format(datetime.datetime.utcnow().isoformat())
         token = self.gh.authorize(self.username, self.password, 
                              scopes=('read:org', 'user:email', 'repo_deployment', 
                                      'repo:status', 'write:repo_hook'), note=token_note)
 
-        return token.token
+        self._github_token = token.token
+        return self._github_token
     
     def repo_token(self, from_repo_owner='GITenberg', create_duplicate=False):
         """
@@ -375,6 +379,14 @@ class GitenbergTravisJob(GitenbergJob):
 
         self._repo_token = token.token
         return self._repo_token
+
+    def delete_repo_token (self):
+        for auth in self.gh.iter_authorizations():
+            if auth.name == "automatic releases for {}/{}".format(self.repo_owner, self.repo_name):
+                auth.delete()
+                return True
+
+        return False
     
     def travis_encrypt(self, token_to_encrypt):
         """
@@ -389,9 +401,21 @@ class GitenbergTravisJob(GitenbergJob):
         else:
             token_string = token_to_encrypt
         
-        repo_public_key_text = self.public_key_for_travis_repo() 
-        repo_public_key = serialization.load_pem_public_key(repo_public_key_text.encode('utf-8'),
-                                                            backend=default_backend())
+        repo_public_key_text = self.public_key_for_travis_repo()
+
+        pubkey = repo_public_key_text.encode('utf-8')
+
+        if 'BEGIN PUBLIC KEY' in pubkey:
+            repo_public_key = serialization.load_pem_public_key(pubkey,
+                backend=default_backend())
+        elif 'BEGIN RSA PUBLIC KEY' in pubkey:
+            # http://stackoverflow.com/a/32804289
+            b64data = '\n'.join(pubkey.splitlines()[1:-1])
+            derdata = base64.b64decode(b64data)
+            repo_public_key = serialization.load_der_public_key(derdata,
+                default_backend())
+        else:
+            raise Exception ('cannot parse repo public key')
 
         ciphertext = repo_public_key.encrypt(
          token_string,
@@ -414,6 +438,18 @@ class GitenbergTravisJob(GitenbergJob):
             return False
 
 class ForkBuildRepo(GitenbergTravisJob):
+
+
+    def fork_repo(self, from_repo_owner='GITenberg'):
+        from_repo = self.gh.repository(from_repo_owner, self.repo_name)
+
+        # fork if necessary
+        if self.gh_repo is None:
+            self.gh_repo = from_repo.create_fork()
+
+        return self.gh_repo
+
+
     def fork_and_build_gitenberg_repo(self, from_repo_owner='GITenberg', 
                                       create_duplicate_token=False,
                                       update_repo_token_file=True):
@@ -470,11 +506,28 @@ class ForkBuildRepo(GitenbergTravisJob):
         return tag_result
         
 class BuildRepo(GitenbergTravisJob):
+
+    def fix_repo_name (self, *args, **kwargs):
+        # check whether repo_name in metadata.yaml and .travis.yml match the repo name
+        md = self.metadata().metadata
+        if md.get('_repo') != self.repo_name:
+            # fix metadata.yaml
+            md['_repo'] = self.repo_name
+            result = self.create_or_update_file(
+                 path = "metadata.yaml",
+                 message = "fix repo name in metadata.yaml",
+                 content = yaml.safe_dump(md,default_flow_style=False,
+                      allow_unicode=True),
+                 ci_skip = True)
+            return result
+        else:
+            return None
         
-    def run(self, from_repo_owner='GITenberg', 
-                                      create_duplicate_token=False,
-                                      update_repo_token_file=True,
-                                      load_repo_token=True):
+    def run(self, from_repo_owner='GITenberg',
+              create_duplicate_token=False,
+              update_repo_token_file=True,
+              load_repo_token=True,
+              fix_repo_name=False):
         """
 
         """
@@ -491,12 +544,16 @@ class BuildRepo(GitenbergTravisJob):
                 encrypted_key = self.travis_encrypt(self.repo_token())
         else:
             encrypted_key = self.travis_encrypt(self.repo_token())
+
+        if fix_repo_name:
+            self.fix_repo_name()
         
         # update .travis.deploy.api_key.txt if requested
         if update_repo_token_file:
             self.create_or_update_file(
                  path = ".travis.deploy.api_key.txt", 
-                 message = "update .travis.deploy.api_key.txt with new encrypted token",
+                 message = self.update_travis_commit_msg if self.update_travis_commit_msg \
+                    else "update .travis.deploy.api_key.txt with new encrypted token",
                  content = encrypted_key,
                  ci_skip = True)
             
@@ -504,7 +561,8 @@ class BuildRepo(GitenbergTravisJob):
         
         self.create_or_update_file(
             path = ".travis.yml",
-            message = "update .travis.yml with new token and repo_owner",
+            message = self.tag_commit_message if self.tag_commit_message \
+               else "update .travis.yml with new token and repo_owner",
             content = self.update_travis_template(write_changes=False, 
                                 encrypted_key=encrypted_key)[0].encode('utf-8'),
             ci_skip = True
@@ -575,7 +633,7 @@ class MetadataWrite(GitenbergJob):
 
 class RepoNameFixer(BuildRepo):
 
-    def run (self):
+    def run (self, *args, **kwargs):
         # check whether repo_name in metadata.yaml and .travis.yml match the repo name
         md = self.metadata().metadata
         if md.get('_repo') != self.repo_name:
@@ -588,5 +646,7 @@ class RepoNameFixer(BuildRepo):
                       allow_unicode=True),
                  ci_skip = True)
 
-        # do rest of run
-        super(RepoNameFixer, self).run()
+            # do rest of run
+            return super(RepoNameFixer, self).run(*args, **kwargs)
+        else:
+            return None
