@@ -1,16 +1,32 @@
+from __future__ import print_function
 __all__ = ['GitenbergJob', 'GitenbergTravisJob', 'ForkBuildRepo', 'BuildRepo', 'BuildRepo2']
 
 # import github3.py
 
+from abc import ABCMeta, abstractmethod
 import base64
-import datetime
+import time, datetime
+from itertools import islice
+import re
+import sys
+import traceback
+
+
 import yaml
 
+from collections import (namedtuple, OrderedDict)
+
+LastBuild = namedtuple('LastBuild', ['number', 'id', 'created', 'started_at', 'finished_at', 'duration', 'state'])
+Buildability = namedtuple('Buildability', ['buildable', 'has_metadata', 'has_source'])
+
 import arrow
+from sqlalchemy import or_
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 import github3
+from github3 import GitHubError
 from github3.repos.release import Release
 
 import gitenberg
@@ -21,6 +37,10 @@ import semantic_version
 from travispy import TravisPy
 
 from second_folio import (travis_template, slugify)
+from gitenberg_db import (Repo, create_session)
+
+
+GH_RATE_BUFFER = 200
 
 class GitenbergJob(object):
     def __init__(self, username, password, repo_name, repo_owner,
@@ -108,6 +128,92 @@ class GitenbergJob(object):
     
     def in_root_tree(self, path):
         return path in [hash_.path for hash_ in self.root_tree()]
+
+    def gh_hash(self, path, root_sha=None, branch="master"):
+
+        repo_branch = self.gh_repo.branch(branch)
+        if root_sha is None:
+            root_sha = repo_branch.commit.sha
+
+        # get rid of trailing and leading '/'
+        path = re.sub(r"^\/|\/$", "", path)
+
+        if not(path):
+            return repo_branch.commit
+
+        path_parts = path.strip().split("/")
+
+        # check for existence of path_parts[0]
+
+        try:
+            tree = self.gh_repo.tree(root_sha).tree
+        except GitHubError as e:
+            if e.code == 422:
+                return None
+            else:
+                raise e
+
+        for hash_ in tree:
+            if hash_.path == path_parts[0]:
+                if len(path_parts) == 1:
+                    return hash_
+                else:
+                    # check rest of path
+                    return self.gh_hash("/".join(path_parts[1:]), root_sha=hash_.sha, branch=branch)
+
+        return None
+
+    def gh_tree(self, sha):
+        try:
+            tree = self.gh_repo.tree(sha).tree
+        except:
+            return []
+        else:
+            return [hash_.path
+                for hash_ in tree]
+
+    def buildable(self):
+
+        has_metadata = self.gh_repo.contents("metadata.yaml", ref="master") is not None
+        has_source = self.source_book() is not None
+        buildable = has_metadata and has_source
+
+        return Buildability(
+            buildable,
+            has_metadata,
+            has_source
+            )
+
+    def source_book(self):
+
+        """
+        return the path of document to use as the source for building epub
+        """
+
+        repo_id = self.repo_name.split("_")[-1]
+        repo_htm_dir = "{repo_id}-h".format(repo_id=repo_id)
+        repo_htm_path = "{repo_id}-h/{repo_id}-h.htm".format(repo_id=repo_id)
+
+        possible_paths = ["book.asciidoc",
+                          repo_htm_path,
+                          "{}-0.txt".format(repo_id),
+                          "{}-8.txt".format(repo_id),
+                          "{}.txt".format(repo_id),
+                         ]
+
+        # calculate relevant hashes in repo
+
+        hashes = self.gh_tree(self.gh_hash("").sha)
+        if repo_htm_dir in hashes:
+            hashes += [repo_htm_dir + "/" + path for path in self.gh_tree(self.gh_hash(repo_htm_dir).sha)]
+
+        # return the first match
+
+        for path in possible_paths:
+            if path in hashes:
+                return path
+
+        return None
         
     def update_travis_and_commit (self, write_changes=True, update_travis=True, tag_commit=True):
         if update_travis:
@@ -298,12 +404,15 @@ class GitenbergJob(object):
         """
         repo is a github3.py repo
         """
-        
+
         md = self.metadata()
         epub_title = slugify(md.metadata.get("title"))
         tag = md.metadata.get("_version")
         url = "https://github.com/GITenberg/{}/releases/download/{}/{}.epub".format(self.repo_name, tag, epub_title)
         return url
+
+    def gh_ratelimit_remaining(self):
+        return self.gh.ratelimit_remaining
  
 class GitenbergTravisJob(GitenbergJob):
     def __init__(self, username, password, repo_name, repo_owner,
@@ -424,6 +533,44 @@ class GitenbergTravisJob(GitenbergJob):
 
         return base64.b64encode(ciphertext)
     
+    def travis_last_build_status(self, refresh=False):
+
+        if refresh:
+            self.travis_repo = self.travis.repo(self.repo_slug)
+
+        try:
+            last_build = self.travis_repo.last_build
+        except KeyError:
+            return LastBuild (
+                None, None, None, None, None, None, None
+            )
+        else:
+            return LastBuild(
+                self.travis_repo.last_build_number,
+                self.travis_repo.last_build_id,
+                self.travis_repo.last_build.created,
+                self.travis_repo.last_build_started_at,
+                self.travis_repo.last_build_finished_at,
+                self.travis_repo.last_build_duration,
+                self.travis_repo.last_build_state
+            )
+
+
+    def status(self, refresh_travis=False):
+        _status =  super(GitenbergTravisJob, self).status()
+
+        last_build = self.travis_last_build_status(refresh_travis)
+        _status.update({
+            'last_build_number': last_build.number,
+            'last_build_id': last_build.id,
+            'last_build_created': last_build.created,
+            'last_build_started_at': last_build.started_at,
+            'last_build_finished_at': last_build.finished_at,
+            'last_build_duration': last_build.duration,
+            'last_build_state': last_build.state,
+            })
+
+        return _status
     
     @staticmethod
     def _authorization_description_already_exists(e):
@@ -606,14 +753,22 @@ def repo_md(repo_id):
 
 class MetadataWrite(GitenbergJob):
     
-    def run(self):
+    def run(self, overwrite=False):
         try:
             import gitenberg
+
+            # check whether metadata file already exists
+            if (not overwrite and
+                self.gh_repo.contents("metadata.yaml", ref="master") is not None):
+                return (self.repo_name, False)
 
             repo_id = self.repo_name.split("_")[-1]
             md = repo_md(repo_id)
             # add version
             md["_version"] = "0.0.1"
+
+            # need to make sure _repo is actually _repo_name
+            md["_repo"] = self.repo_name
 
             # add keywords 
             subjects = md.get("subjects")
@@ -650,3 +805,165 @@ class RepoNameFixer(BuildRepo):
             return super(RepoNameFixer, self).run(*args, **kwargs)
         else:
             return None
+
+class GitenbergJobRunner:
+    __metaclass__ = ABCMeta
+
+    def __init__(self, dbfname, gh_username, gh_password, access_token=None):
+        self.dbfname = dbfname
+        self.gh_username = gh_username
+        self.gh_password = gh_password
+        self.access_token = access_token
+        self.gh = github3.login(gh_username, password=gh_password)
+        self._session = None
+        self.results = OrderedDict()
+
+    def countdown(self, n, delta=0.5):
+        now = arrow.now()
+        then = now + datetime.timedelta(seconds=n)
+        while now < then:
+            print ("\r{}".format(then - now), end="")
+            time.sleep(delta)
+            now = arrow.now()
+
+    def exceptions(self):
+        return [item[0] for item in self. results.items() if isinstance(item[1][0], Exception)]
+
+    def repos(self, n=None):
+        """
+        by default return all repos
+        """
+
+        return islice((self.session().query(Repo)),n)
+
+    def repo_names(self, n=None):
+        return islice((repo.repo_name for repo in self.repos()), n)
+
+    def run(self, n=None):
+        for (i, repo) in enumerate(self.repos(n)):
+            repo_name = repo.repo_name
+
+            try:
+                self.run_job(repo)
+            except Exception, e:
+                (exc_type, exc_value, exc_tb) = sys.exc_info()
+                stack_trace = " ".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+
+                self.results[repo_name] = (e, stack_trace)
+                print (e, stack_trace)
+                break
+
+            print ("\r{}: {}".format(i, self.results[repo_name]), end="")
+            time.sleep(0.5)
+
+            if self.gh.ratelimit_remaining < GH_RATE_BUFFER:
+                print ("github rate limit reached")
+                dt = arrow.get(self.gh.rate_limit()['rate']['reset']) - arrow.now()
+                self.countdown(dt.seconds)
+
+    @abstractmethod
+    def run_job(self, repo):
+        pass
+
+    def session(self):
+        if self._session is None:
+            self._session = create_session(self.dbfname)
+        return self._session
+
+class MetadataWriterRunner(GitenbergJobRunner):
+
+    def repos(self, n=None):
+
+        return islice((self.session().query(Repo)
+         .filter(Repo.metadata_written == None)
+         ),n)
+
+    def run_job(self, repo):
+
+        repo_name = repo.repo_name
+
+        bj = MetadataWrite(username=self.gh_username, password=self.gh_password,
+               repo_name=repo_name,
+               repo_owner = "GITenberg",
+               update_travis_commit_msg="first version of metadata.yaml",
+               tag_commit_message="first version of metadata.yaml")
+
+        self.results[repo_name] = (bj, bj.run(overwrite=False))
+
+        repo.updated = arrow.now().isoformat()
+        repo.metadata_written = arrow.now().isoformat()
+
+        self.session().commit()
+
+class RepoJobRunner(GitenbergJobRunner):
+
+    def repos(self, n):
+        return islice((self.session().query(Repo)
+            .filter(or_(Repo.buildable == None, Repo.buildable == True))
+            .filter(Repo.datebuilt == None)
+            .filter(Repo.metadata_written != None)
+         ),n)
+
+    def run_job(self, repo):
+        repo_name = repo.repo_name
+
+        bj = BuildRepo2(username=self.gh_username,
+                password=self.gh_password,
+                repo_name=repo_name,
+                repo_owner='GITenberg',
+                update_travis_commit_msg='build using gitenberg.travis',
+                tag_commit_message='build using gitenberg.travis',
+                access_token=self.access_token)
+
+        #self.results[repo_name] = (bj, bj.run())
+
+        buildable = bj.buildable()
+
+        repo.buildable = buildable.buildable
+        repo.has_source = buildable.has_source
+        repo.has_metadata = buildable.has_metadata
+
+        if buildable.buildable:
+            self.results[repo_name] = (bj, bj.run())
+            repo.datebuilt = arrow.now().isoformat()
+        else:
+            self.results[repo_name] = (bj, False)
+
+        # just mark as started
+
+        repo.updated = arrow.now().isoformat()
+
+        self.session().commit()
+
+class StatusUpdateRunner(GitenbergJobRunner):
+
+    def repos(self, n):
+        return islice((self.session().query(Repo)
+                .filter(Repo.datebuilt != None)
+                .filter(Repo.last_build_id == None)
+         ),n)
+
+    def run_job(self, repo):
+        repo_name = repo.repo_name
+
+        bj = BuildRepo2(username=self.gh_username,
+                password=self.gh_password,
+                repo_name=repo_name,
+                repo_owner='GITenberg',
+                update_travis_commit_msg='build using gitenberg.travis',
+                tag_commit_message='build using gitenberg.travis',
+                access_token=self.access_token)
+
+        #self.results[repo_name] = (bj, bj.run())
+
+        status = bj.status()
+        self.results[repo_name] = status
+
+        repo.version = status['version']
+        repo.ebooks_in_release_count = status['ebooks_in_release_count']
+        repo.last_build_id = status['last_build_id']
+        repo.last_build_state = status['last_build_state']
+
+        repo.updated = arrow.now().isoformat()
+
+        self.session().commit()
