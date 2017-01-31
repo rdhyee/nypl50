@@ -809,7 +809,7 @@ class RepoNameFixer(BuildRepo):
 class GitenbergJobRunner:
     __metaclass__ = ABCMeta
 
-    def __init__(self, dbfname, gh_username, gh_password, access_token=None):
+    def __init__(self, dbfname, gh_username, gh_password, access_token=None, max_exceptions=None):
         self.dbfname = dbfname
         self.gh_username = gh_username
         self.gh_password = gh_password
@@ -817,6 +817,8 @@ class GitenbergJobRunner:
         self.gh = github3.login(gh_username, password=gh_password)
         self._session = None
         self.results = OrderedDict()
+        self.max_exceptions = max_exceptions
+        self.n_exceptions = 0
 
     def countdown(self, n, delta=0.5):
         now = arrow.now()
@@ -837,7 +839,7 @@ class GitenbergJobRunner:
         return islice((self.session().query(Repo)),n)
 
     def repo_names(self, n=None):
-        return islice((repo.repo_name for repo in self.repos()), n)
+        return (repo.repo_name for repo in self.repos(n))
 
     def run(self, n=None):
         for (i, repo) in enumerate(self.repos(n)):
@@ -850,8 +852,10 @@ class GitenbergJobRunner:
                 stack_trace = " ".join(traceback.format_exception(exc_type, exc_value, exc_tb))
 
                 self.results[repo_name] = (e, stack_trace)
-                print (e, stack_trace)
-                break
+                self.n_exceptions += 1
+                if (self.max_exceptions is not None) and (self.n_exceptions >= self.max_exceptions):
+                    print (e, stack_trace)
+                    break
 
             print ("\r{}: {}".format(i, self.results[repo_name]), end="")
             time.sleep(0.5)

@@ -12,7 +12,15 @@ import yaml
 import jinja2
 import semantic_version
 
+import logging
+assert logging.getLogger().getEffectiveLevel() == 30
+
 from gitenberg import metadata
+
+# set logging level back to 30
+logging.getLogger().setLevel(30)
+
+assert logging.getLogger().getEffectiveLevel() == 30
 
 # a list of the repos under the https://github.com/GITenberg/ org
 # e.g., Adventures-of-Huckleberry-Finn_76 -> https://github.com/GITenberg/Adventures-of-Huckleberry-Finn_76/
