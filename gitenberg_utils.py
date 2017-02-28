@@ -418,6 +418,20 @@ class GitenbergTravisJob(GitenbergJob):
     def __init__(self, username, password, repo_name, repo_owner,
                update_travis_commit_msg,
                tag_commit_message, github_token=None, access_token=None, repo_token=None):
+
+        """A subclass of GitenbergJob that adds travis-ci related functionality
+
+        Keyword arguments:
+        username -- GitHub username
+        password -- GitHub password
+        repo_name -- name of Gitenberg repo (e.g., "Moby-Dick--Or-The-Whale_2701")
+        repo_owner -- e.g., 'GITenberg' for https://github.com/gitenberg/At-the-Sign-of-the-Eagle_6218
+        update_travis_commit_msg -- the git commit message for the update commit
+        tag_commit_message -- the git commit message for the tagging commit
+        github_token (optional) -- a GitHub token that is ued to obtain travis access token
+        access_token (optional) -- the travis access token corresponding to GitHub account
+        repo_token (optional) -- the travis token for building the given repo
+        """
         
         super(GitenbergTravisJob, self).__init__(username, password, repo_name, repo_owner,
                update_travis_commit_msg,
@@ -430,8 +444,11 @@ class GitenbergTravisJob(GitenbergJob):
         self._access_token = access_token
 
         # if access_token is given, use it
+        # the access token corresponds to the output of the travis cli operation
+        # `travis token`
         if access_token is not None:
             self.travis = TravisPy(access_token)
+        # otherwise, we can pass a GitHub token to travis
         else:
             self.travis = TravisPy.github_auth(self.github_token())
 
@@ -450,6 +467,10 @@ class GitenbergTravisJob(GitenbergJob):
 
 
     def github_token(self):
+        """
+        use the GitHub token in the parameters; otherwise create a new GitHub token with the appropropriate permissions
+
+        """
 
         if self._github_token is not None:
             return self._github_token
@@ -463,9 +484,6 @@ class GitenbergTravisJob(GitenbergJob):
         return self._github_token
     
     def repo_token(self, from_repo_owner='GITenberg', create_duplicate=False):
-        """
-       
-        """
 
         if self._repo_token is not None:
             return self._repo_token
